@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Annapoorna Meal Tracker</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js"></script>
+<style>
+  body { font-family: Arial, sans-serif; max-width: 380px; margin: 40px auto; padding: 0 20px; }
+  h2 { text-align: center; }
+  input, select, button {
+    width: 100%; padding: 12px; margin: 8px 0; font-size: 16px;
+    box-sizing: border-box; border-radius: 6px; border: 1px solid #ccc;
+  }
+  button { background: #2e7d32; color: white; border: none; cursor: pointer; }
+  #message { text-align: center; margin-top: 12px; font-weight: bold; }
+  #dashboard { display: none; }
+  .card { border: 1px solid #ddd; border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+  .row { display: flex; justify-content: space-between; margin: 6px 0; font-size: 15px; }
+  .label { color: #666; }
+  .big { font-size: 28px; font-weight: bold; text-align: center; margin: 10px 0; }
+  #scannerBox { display: none; margin-top: 10px; }
+  #qr-reader { width: 100%; border-radius: 8px; overflow: hidden; }
+  #cancelScan { background: #999; }
+</style>
+</head>
+<body>
+
+<h2>Annapoorna Meal Tracker</h2>
+
+<div id="loginScreen">
+  <input type="text" id="rollNumber" placeholder="Roll Number">
+  <input type="text" id="dob" placeholder="DOB (YYYY-MM-DD)">
+  <button onclick="login()">Login</button>
+</div>
+
+<div id="dashboard">
+  <div class="card">
+    <div class="row"><span class="label">Name</span><span id="dName"></span></div>
+    <div class="row"><span class="label">Roll Number</span><span id="dRoll"></span></div>
+    <div class="row"><span class="label">Spent today</span><span id="dSpent"></span></div>
+    <div class="label" style="text-align:center; margin-top:10px;">Remaining balance</div>
+    <div class="big" id="dRemaining">₹70</div>
+  </div>
+
+  <input type="number" id="amount" placeholder="Amount to spend (₹)">
+  <button onclick="startScan()">Confirm Spend</button>
+  <button onclick="logout()" style="background: #999; margin-top: 4px;">Logout</button>
+
+  <div id="scannerBox">
+    <p style="text-align:center; font-size:14px; color:#555;">Scan the canteen's QR code</p>
+    <div id="qr-reader"></div>
+    <button id="cancelScan" onclick="cancelScan()">Cancel</button>
+  </div>
+</div>
+
+<div id="message"></div>
+
+<script>
+  // PASTE YOUR APPS SCRIPT WEB APP URL BELOW (ends in /exec)
+  var WEBAPP_URL = "https://script.google.com/macros/s/AKfycbw8ZwnAzC8JKeyCyv5qhz8DkNJjlEKFgMZ8dX5s_-__vHDkOGlIUYXFt-VjBTURiaCF/exec";
+
+  var currentStudent = null;
+  var pendingAmount = null;
+  var html5QrCode = null;
+
+  window.onload = function() {
+    var saved = localStorage.getItem('meal_session');
+    if (saved) {
+      currentStudent = JSON.parse(saved);
+      showDashboard();
+    }
+  };
+
+  function callApi(params) {
+    var url = WEBAPP_URL + "?" + new URLSearchParams(params).toString();
+    return fetch(url).then(function(res) { return res.json(); });
+  }
+
+  function login() {
+    var roll = document.getElementById('rollNumber').value;
+    var dob = document.getElementById('dob').value;
+    document.getElementById('message').innerText = 'Checking...';
+
+    callApi({ action: "login", rollNumber: roll, dob: dob })
+      .then(function(result) {
+        if (result.success) {
+          currentStudent = result;
+          localStorage.setItem('meal_session', JSON.stringify(result));
+          showDashboard();
+          document.getElementById('message').innerText = '';
+        } else {
+          document.getElementById('message').innerText = result.message;
+        }
+      })
+      .catch(function(err) {
+        document.getElementById('message').innerText = 'Error: ' + err;
+      });
+  }
+
+  function showDashboard() {
+    document.getElementById('loginScreen').style.display = 'none';
+    document.getElementById('dashboard').style.display = 'block';
+    document.getElementById('dName').innerText = currentStudent.name;
+    document.getElementById('dRoll').innerText = currentStudent.rollNumber;
+    refreshBalance();
+  }
+
+  function refreshBalance() {
+    callApi({ action: "dashboard", rollNumber: currentStudent.rollNumber, token: currentStudent.token })
+      .then(function(result) {
+        if (result.success) {
+          document.getElementById('dSpent').innerText = '₹' + result.spent;
+          document.getElementById('dRemaining').innerText = '₹' + result.remaining;
+        } else if (result.loggedOut) {
+          handleLogout(result.message);
+        }
+      });
+  }
+
+  function startScan() {
+    var amount = document.getElementById('amount').value;
+    var msg = document.getElementById('message');
+
+    if (!amount || Number(amount) <= 0) {
+      msg.innerText = 'Enter a valid amount.';
+      return;
+    }
+    pendingAmount = amount;
+    msg.innerText = '';
+    document.getElementById('scannerBox').style.display = 'block';
+
+    html5QrCode = new Html5Qrcode("qr-reader");
+    html5QrCode.start(
+      { facingMode: "environment" },
+      { fps: 10, qrbox: 220 },
+      onScanSuccess,
+      function(errorMessage) { /* ignore scan-in-progress errors */ }
+    ).catch(function(err) {
+      msg.innerText = 'Camera error: ' + err;
+      document.getElementById('scannerBox').style.display = 'none';
+    });
+  }
+
+  function onScanSuccess(decodedText) {
+    stopScanner();
+    var canteen = null;
+    if (decodedText.trim() === 'CANTEEN_A') canteen = 'A';
+    else if (decodedText.trim() === 'CANTEEN_B') canteen = 'B';
+
+    if (!canteen) {
+      document.getElementById('message').innerText = 'Not a valid canteen QR code.';
+      return;
+    }
+    submitSpend(canteen, pendingAmount);
+  }
+
+  function cancelScan() {
+    stopScanner();
+    document.getElementById('message').innerText = 'Scan cancelled.';
+  }
+
+  function stopScanner() {
+    if (html5QrCode) {
+      html5QrCode.stop().then(function() {
+        html5QrCode.clear();
+        document.getElementById('scannerBox').style.display = 'none';
+      }).catch(function() {
+        document.getElementById('scannerBox').style.display = 'none';
+      });
+    }
+  }
+
+  function submitSpend(canteen, amount) {
+    var msg = document.getElementById('message');
+    msg.innerText = 'Processing...';
+
+    callApi({
+      action: "spend",
+      rollNumber: currentStudent.rollNumber,
+      name: currentStudent.name,
+      canteen: canteen,
+      amount: amount,
+      token: currentStudent.token
+    }).then(function(result) {
+      msg.innerText = result.message;
+      if (result.success) {
+        document.getElementById('dSpent').innerText = '₹' + result.spent;
+        document.getElementById('dRemaining').innerText = '₹' + result.remaining;
+        document.getElementById('amount').value = '';
+      }
+      if (result.loggedOut) {
+        handleLogout(result.message);
+      }
+    }).catch(function(err) {
+      msg.innerText = 'Error: ' + err;
+    });
+  }
+
+  function logout() {
+    callApi({ action: "logout", rollNumber: currentStudent.rollNumber }).then(function() {
+      localStorage.removeItem('meal_session');
+      currentStudent = null;
+      document.getElementById('dashboard').style.display = 'none';
+      document.getElementById('loginScreen').style.display = 'block';
+      document.getElementById('rollNumber').value = '';
+      document.getElementById('dob').value = '';
+      document.getElementById('message').innerText = '';
+    });
+  }
+
+  function handleLogout(message) {
+    document.getElementById('message').innerText = message;
+    localStorage.removeItem('meal_session');
+    setTimeout(function() { location.reload(); }, 2000);
+  }
+</script>
+
+</body>
+</html>
